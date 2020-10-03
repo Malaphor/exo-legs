@@ -8,12 +8,12 @@ template<>        inline Print& operator <<(Print &obj, float arg) { obj.print(a
 
 //read only and #define
 #define DEBUG 1
-#define rightPosPinHip A7  //pin to read pot val for hip pos
-#define rightPosPinKnee A8  //pin to read pot val for knee pos
-#define rightPosPinAnkle A9  //pin to read pot val for ankle pos
-#define leftPosPinHip A4  //pin to read pot val for hip pos
-#define leftPosPinKnee A5  //pin to read pot val for knee pos
-#define leftPosPinAnkle A6  //pin to read pot val for ankle pos
+#define rightPosPinHip A9  //pin to read pot val for hip pos
+#define rightPosPinKnee A5  //pin to read pot val for knee pos
+#define rightPosPinAnkle A4  //pin to read pot val for ankle pos
+#define leftPosPinHip A8  //pin to read pot val for hip pos
+#define leftPosPinKnee A6  //pin to read pot val for knee pos
+#define leftPosPinAnkle A7  //pin to read pot val for ankle pos
 
 const float potValToDeg = 2.6;  //convert analog pot val to degrees
 const int rightHipOffset = 0;  //potVal when hip is at 0deg
@@ -23,7 +23,7 @@ const int leftHipOffset = 0;  //potVal when hip is at 0deg
 const int leftKneeOffset = 533;  //potVal when knee is at 0deg
 const int leftAnkleOffset = 459;  //potVal when ankle = 0deg
 const float posDiffThreshold = 0.01;  //how close to target angle before its ready, in motor revs
-const int numJoints = 6;  //number of active joints
+const int numJoints = 4;  //number of active joints
 
 int led = 13;
 
@@ -32,8 +32,7 @@ bool readyToMove = false;  //no errors, is everything calibrated and homed?
 bool programRunning = false;  //is program running?
 int leftLegTarget = 24;
 int rightLegTarget = 0;
-bool rightLegReady = false;  //all right joints reached target angle?
-bool leftLegReady = false;  //all left joints reached target angle?
+bool allJointsReady = false;  //are all joints at target angle?
 
 //joint homing, start position, calibration
 bool allJointsHomed = true;  //all joints at 0 degrees?
@@ -43,6 +42,7 @@ bool atStart = true;  //all joints at start angle?
 char inBytes[32];  //array to read in commands via serial
 bool doneReading = false;  //finished reading cmd via serial?
 float inVal = 0;  //manual pos cmd via serial
+String optionString = "Options: <x> to clear errors, <c1> to calibrate axis1, <h> to home joints, <r> to run program, <s> to stop";
 
 //speed variables
 float segTime = 0.314;  //0.0314 time in sec between angle datapoints, walk speed
@@ -63,6 +63,7 @@ int ankleMax = 250;  //in counts: 26666;
 */
 
 //error variables
+uint32_t errorVals[3] = {0, 0, 0};  //initialize errors to 0, no errors
 uint32_t axisError = 0;
 uint32_t motorError = 0;
 uint32_t encoderError = 0;
@@ -90,15 +91,16 @@ float *kneeAnglesPtr = kneeAngles;
 float *ankleAnglesPtr = ankleAngles;
 
 
-ODriveTeensyCAN odriveCAN;
+ODriveTeensyCAN odriveCAN;  //CAN bus
+ODriveTeensyCAN *odriveCANPtr = &odriveCAN;
 
 //joint objects
-Joint leftKnee(0, leftPosPinKnee, leftKneeOffset, kneeAnglesPtr, 24);  //node_id, potPin, offset, angles, leg target
-Joint leftAnkle(1, leftPosPinAnkle, leftAnkleOffset, ankleAnglesPtr, 24);
-Joint rightKnee(2, rightPosPinKnee, rightKneeOffset, kneeAnglesPtr, 0);
-Joint rightAnkle(3, rightPosPinAnkle, rightAnkleOffset, ankleAnglesPtr, 0);
-Joint leftHip(4, leftPosPinHip, leftHipOffset, hipAnglesPtr, 24);
-Joint rightHip(5, rightPosPinHip, rightHipOffset, hipAnglesPtr, 0);
+Joint leftKnee(0, leftPosPinKnee, leftKneeOffset, kneeAnglesPtr, 24, odriveCANPtr);  //node_id, potPin, offset, angles, leg target
+Joint leftAnkle(1, leftPosPinAnkle, leftAnkleOffset, ankleAnglesPtr, 24, odriveCANPtr);
+Joint rightKnee(2, rightPosPinKnee, rightKneeOffset, kneeAnglesPtr, 0, odriveCANPtr);
+Joint rightAnkle(3, rightPosPinAnkle, rightAnkleOffset, ankleAnglesPtr, 0, odriveCANPtr);
+Joint leftHip(4, leftPosPinHip, leftHipOffset, hipAnglesPtr, 24, odriveCANPtr);
+Joint rightHip(5, rightPosPinHip, rightHipOffset, hipAnglesPtr, 0, odriveCANPtr);
 
 //pointers to joint objects
 Joint *leftKneeR = &leftKnee;
@@ -108,9 +110,9 @@ Joint *rightAnkleR = &rightAnkle;
 Joint *leftHipR = &leftHip;
 Joint *rightHipR = &rightHip;
 
-Joint *allJoints[] = {leftKneeR, leftAnkleR, rightKneeR, rightAnkleR, leftHipR, rightHipR};
+Joint *allJoints[] = {leftAnkleR, leftKneeR, rightAnkleR, rightKneeR, leftHipR, rightHipR};
 
-char *jointNames[] = {"Left knee", "Left ankle", "Right knee", "Right ankle", "Left hip", "Right hip"};
+char *jointNames[] = {"Left ankle", "Left knee", "Right ankle", "Right knee", "Left hip", "Right hip"};
 
 void setup() {
   // put your setup code here, to run once:
@@ -121,35 +123,43 @@ void setup() {
   while(!Serial) {
     //wait for computer serial connection
   }
-  while(!odriveCAN.available()) {
+  delay(100);
+  //while(!odriveCAN.available()) {
     //wait for CAN bus connection
-  }
+    //Serial << "asdfg" << '\n';//odriveCAN.heartbeat() << '\n';
+  //}
   #ifdef DEBUG
   Serial.println("hey1");
+  for(int i = 0;i < numJoints;i++) {
+    Serial << odriveCAN.Heartbeat() << '\n';
+  }
   #endif
 
+  delay(100);
   for(int i = 0;i < numJoints;i++) {
-    odriveCAN.RunState(allJoints[i]->node_id, ODriveTeensyCAN::AXIS_STATE_CLOSED_LOOP_CONTROL);
-    int currentState = odriveCAN.GetCurrentState(allJoints[i]->node_id);
-    if(currentState == 8) {
+    allJoints[i]->ClosedLoopCtrl();
+    delay(1 / 7999);
+    
+    if(allJoints[i]->GetCurrentState() == ODriveTeensyCAN::AXIS_STATE_CLOSED_LOOP_CONTROL) {
       Serial << jointNames[i] << " ready" << '\n';
     } else {
       Serial << jointNames[i] << " failed to enter closed loop control" << '\n';
+      allJoints[i]->GetErrors(errorVals);
     }
     delay(100);
   }
   
   Serial.println("Setup Complete");
-  Serial.println("Options: <c1> to calibrate axis1, <h> to home joints, <r> to run program, <s> to stop");
+  Serial.println(optionString);
 }
 
 void loop() {
   // put your main code here, to run repeatedly:
-  if(!isError) {
+  if(isError == false) {
     checkForErrors();
   }
   //motorError = odriveCAN.GetMotorError(axes[1]);
-  Serial << odriveCAN.GetCurrentState(allJoints[1]) << '\n';
+  //Serial << odriveCAN.GetCurrentState(allJoints[1]) << '\n';
   
   if(Serial.available()) {
     Serial.println("incoming");
@@ -157,65 +167,52 @@ void loop() {
     return;
   }
   
-  if(programRunning && isError == false) {
+  if(programRunning == true && isError == false) {
   Serial.println("yo");
   //if(allJointsHomed && atStart) {
-    //moveLeftKnee();
-//    moveLeftAnkle();
-    if(leftKneeReady && leftAnkleReady) {
-      leftLegTarget++;
-      leftKneeReady = false;
-      leftAnkleReady = false;
+    for(int i = 0;i < numJoints;i++) {
+      moveJoint(allJoints[i]);
       
-      if(leftLegTarget >= 50) {
-        leftLegTarget = 0;
+      for(int j = 0;j < numJoints;j++) {
+        if(allJoints[j]->readyToMove == true) {  //if joint is at target angle
+          allJointsReady = true;
+        } else {  //first joint that's not at target ruins it for everyone
+          allJointsReady = false;
+        }
+      }
+
+      if(allJointsReady == true) {
+        for(int j = 0;j < numJoints;j++) {
+          allJoints[j]->readyToMove = false;
+          allJoints[j]->targetAngle++;
+          if(allJoints[j]->targetAngle >= 50) {
+            allJoints[j]->targetAngle = 0;
+          }
+        }
       }
     }
-  /*} else {
+  } else {
     programRunning = false;
-  }*/
   }
+  //}
 }
-
-/*void moveLeftKnee() {
-  if(!leftKneeReady) {
-    leftKneePosEstimate = odriveCAN.GetPosition(axes[1]) / 120;  //motor position / gear ratio
-    float absDiff = (leftKneePosEstimate - (kneeAngles[leftLegTarget] / 360.0)) * 120;
-    #ifdef DEBUG
-      Serial << "Pos est: " << leftKneePosEstimate * 120 << ", Target: " << leftLegTarget << "(" << kneeAngles[leftLegTarget] / 360 * 120 << ")" << '\n';
-      Serial << "Velocity: " << odriveCAN.GetVelocity(axes[1]) << "Pos diff: " << fabs(absDiff) << '\n';
-    #endif
-    /*if(leftLegTarget == 0) {
-      leftKneeSpeed = (kneeAngles[49] - kneeAngles[leftLegTarget]) / 360 / segTime;
-    } else {
-      leftKneeSpeed = (kneeAngles[leftLegTarget] - kneeAngles[leftLegTarget - 1]) / 360 / segTime;
-    }
-
-    odriveCAN.SetPosition(axes[1], kneeAngles[leftLegTarget] / 360.0 * 120);
-          
-    if(fabs(absDiff) <= posDiffThreshold) {
-      leftKneeReady = true;
-    }
-  }
-}*/
 
 void moveJoint(Joint *joint) {
   if(joint->readyToMove == false) {
-    joint->posEstimate = odriveCAN.GetPosition(joint->node_id) / 120.0;  //motor position / gear ratio
-    float absDiff = (joint->posEstimate - (joint->angles[joint->targetAngle] / 360.0)) * 120;
+    joint->GetPosition();  //motor position / gear ratio
+    float absDiff = (joint->posEstimate - joint->GetTargetPosition());
     #ifdef DEBUG
-      Serial << "Pos est: " << joint->posEstimate * 120 << ", Target: " << joint->targetAngle <<
-             "(" << joint->angles[joint->targetAngle] / 360.0 * 120 << ")" << '\n';
-      Serial << "Velocity: " << odriveCAN.GetVelocity(joint->node_id) << "Pos diff: " << fabs(absDiff) 
-             << '\n';
+      Serial << "Pos est: " << joint->posEstimate << ", Target: " << joint->targetAngle <<
+             "(" << joint->GetTargetPosition() << ")" << '\n';
+      Serial << "Velocity: " << joint->GetVelocity() << "Pos diff: " << fabs(absDiff) << '\n';
     #endif
-    /*if(leftLegTarget == 0) {
-      leftAnkleSpeed = (ankleAngles[49] - ankleAngles[leftLegTarget]) / 360 / segTime;
+    /*if(joint->targetAngle == 0) {
+      joint->targetVelocity = (joint->angles[49] - joint->angles[0]) / 360 / segTime;
     } else {
-      leftAnkleSpeed = (ankleAngles[leftLegTarget] - ankleAngles[leftLegTarget - 1]) / 360 / segTime;
+      joint->targetVelocity = (joint->angles[joint->targetAngle] - joint->angles[joint->targetAngle - 1]) / 360 / segTime;
     }*/
 
-    odriveCAN.SetPosition(joint->node_id, joint->angles[joint->targetAngle] / 360.0 * 120);
+    joint->SetPosition(joint->GetTargetPosition());
           
     if(fabs(absDiff) <= posDiffThreshold) {
       joint->readyToMove = true;
@@ -250,36 +247,45 @@ void readInput() {
   }
 
   if(doneReading) {
-    Serial << "inByte: " << inBytes[0] << '\n';
-    if(inBytes[0] == 'c') {  //calibration sequence
-      allJoints[inBytes[1]]->calibrated = false;
+    #ifdef DEBUG
+      Serial << "inByte: " << inBytes[0] << '\n';
+    #endif
+    if(inBytes[0] == 'x') {  //attempt to clear errors
+      isError = false;
+      for(int i = 0;i < numJoints;i++) {
+        allJoints[i]->ClearErrors();
+        checkJointErrors(allJoints[i]);
+      }
+      if(isError == true) {
+        Serial << "Problems persist" << '\n';
+      } else {
+        Serial << "All errors cleared" << '\n';
+      }
+      Serial.println(optionString);
+    } else if(inBytes[0] == 'c') {  //calibration sequence
+      Joint *joint = allJoints[inBytes[1]];
+      
+      joint->calibrated = false;
       Serial << "Calibrating " << jointNames[inBytes[1]] << " joint..." << '\n';
-      
-      Serial << jointNames[inBytes[1]] << " motor calibration" << '\n';
-      odriveCAN.RunState(allJoints[inBytes[1]]->node_id, ODriveTeensyCAN::AXIS_STATE_MOTOR_CALIBRATION);
-      motorError = odriveCAN.GetMotorError(allJoints[inBytes[1]]->node_id);
-      if(motorError == 0) {
-        Serial << "Motor calibration successful" << '\n';
-      } else {
-        Serial << "Motor calibration failed. Error code " << motorError << '\n';
-        return;
-      }
 
-      Serial << jointNames[inBytes[1]] << " encoder calibration" << '\n';
-      odriveCAN.RunState(allJoints[inBytes[1]]->node_id, ODriveTeensyCAN::AXIS_STATE_ENCODER_OFFSET_CALIBRATION);
-      encoderError = odriveCAN.GetEncoderError(allJoints[inBytes[1]]->node_id);
-      if(encoderError == 0) {
-        Serial << "Encoder calibration successful" << '\n';
-      } else {
-        Serial << "Encoder calibration failed. Error code " << encoderError << '\n';
-        return;
+      joint->Calibrate();
+
+      while(joint->GetCurrentState() != 1) {
+        //wait for calibration to finish
       }
-      
-      allJoints[inBytes[1]]->calibrated = true;
+      joint->GetErrors(errorVals);
+      joint->ClosedLoopCtrl();
+      delay(1 / 7999);
+      if(joint->GetCurrentState() != 1) {
+        checkJointErrors(joint);
+      } else {
+        allJoints[inBytes[1]]->calibrated = true;
+        Serial << "Calibration successful" << '\n';
+      }
       doneReading = false;
     } else if(inBytes[0] == 's') {  //stop everything
       for(int i = 0;i < numJoints;i++) {
-        odriveCAN.RunState(allJoints[i]->node_id, ODriveTeensyCAN::AXIS_STATE_IDLE);
+        allJoints[i]->StopMotion();
       }
       Serial.println("Movement stopped");
       programRunning = false;
@@ -287,24 +293,28 @@ void readInput() {
       bool problem = false;
       for(int i = 0;i < numJoints;i++) {
         if(allJoints[i]->calibrated == false) {
-          Serial << jointNames[i] << " not calibrated. Calibration joint first" << '\n';
+          Serial << jointNames[i] << " not calibrated. Calibrate joint first" << '\n';
           problem = true;
         }
       }
       if(problem) {
-        Serial.println("Options: <c1> to calibrate axis1, <h> to home joints, <r> to run program, <s> to stop");
+        Serial.println(optionString);
+        doneReading = false;
         return;
       }
       for(int i = 0;i < numJoints;i++) {
         if(allJoints[i]->homed == false) {
-          Serial << jointNames[i] << " not homed. Homing joint..." << '\n';
-          homeJoint(allJoints[i]);
+          Serial << "Not all joints are homed. Homing joint..." << '\n';
+          homeJoints();
         }
       }
       if(!atStart) {
         Serial.println("Moving joints to start position...");
         toStartPosition();
       } else {
+        for(int i = 0;i < numJoints;i++) {
+          odriveCAN.RunState(allJoints[i]->node_id, ODriveTeensyCAN::AXIS_STATE_CLOSED_LOOP_CONTROL);
+        }
         Serial.println("Starting program");
         delay(500);
         programRunning = true;
@@ -319,22 +329,33 @@ void readInput() {
 
 void checkForErrors() {
   for(int i = 0;i < numJoints;i++) {
-    motorError = odriveCAN.GetMotorError(allJoints[i]);
-    encoderError = odriveCAN.GetEncoderError(allJoints[i]);
-    axisError = odriveCAN.GetAxisError(allJoints[i]);
-
-    if(motorError != 0 || encoderError != 0 || axisError != 0) {
-      programRunning = false;
-      isError = true;
-      Serial << jointNames[allJoints[i]->node_id] << ":" << '\n';
-      Serial << '\t' << "Motor error: " << motorError << '\n';
-      Serial << '\t' << "Encoder error: " << encoderError << '\n';
-      Serial << '\t' << "Axis error: " << axisError << '\n';
-    }
+    checkJointErrors(allJoints[i]);
   }
 }
 
-void homeJoint(Joint *joint) {
+void checkJointErrors(Joint *joint) {
+  joint->GetErrors(errorVals);
+    
+  if(errorVals[0] != 0 || errorVals[1] != 0 || errorVals[2] != 0) {
+    programRunning = false;
+    isError = true;
+    Serial << jointNames[joint->node_id] << ":" << '\n';
+  }
+  if(errorVals[0] != 0) {
+    Serial << '\t' << "Motor error: ";
+    Serial.println(motorError, HEX);
+  }
+  if(errorVals[1] != 0) {
+    Serial << '\t' << "Encoder error: ";
+    Serial.println(encoderError, HEX);
+  }
+  if(errorVals[2] !=0) {
+    Serial << '\t' << "Axis error: ";
+    Serial.println(axisError, HEX);
+  }
+}
+
+void homeJoint() {
   if(!isError) {
     checkForErrors();
   } else {
@@ -342,8 +363,9 @@ void homeJoint(Joint *joint) {
   }
   float posDiff = 0;  //difference between current & home pos in revs
   
-  for(int i = 0;i < numJoints;i++) {
-    odriveCAN.SetVelocityLimit(allJoints[i]->node_id, 6.0);
+  odriveCAN.SetVelocityLimit(joint->node_id, 6.0);  //velocity limit = 6revs/s
+  if(odriveCAN.GetCurrentState(joint->node_id) != 8) {  //8 is closed loop control
+    odriveCAN.RunState(joint->node_id, ODriveTeensyCAN::AXIS_STATE_CLOSED_LOOP_CONTROL);
   }
   
   while(!joint->homed) {
@@ -351,7 +373,12 @@ void homeJoint(Joint *joint) {
       readInput();
       return;
     }
-
+    if(!isError) {
+      checkForErrors();
+    } else {
+      return;
+    }
+    
     posDiff = (joint->GetPotPos() - joint->potOffset) * potValToDeg / 360.0;  //pos diff from deg to revs
     joint->posEstimate = odriveCAN.GetPosition(joint->node_id);
 
@@ -373,11 +400,19 @@ void toStartPosition() {
 
   for(int i = 0;i < numJoints;i++) {
     odriveCAN.SetVelocityLimit(allJoints[i]->node_id, 6.0);
+    if(odriveCAN.GetCurrentState(allJoints[i]->node_id) != 8) {  //8 is closed loop control
+      odriveCAN.RunState(allJoints[i]->node_id, ODriveTeensyCAN::AXIS_STATE_CLOSED_LOOP_CONTROL);
+    }
   }
   
   while(!atStart) {
     if(Serial.available()) {
       readInput();
+      return;
+    }
+    if(!isError) {
+      checkForErrors();
+    } else {
       return;
     }
 
@@ -392,14 +427,14 @@ void toStartPosition() {
         }
       }
     }
-
+/*
     for(int i = 0;i < numJoints;i++) {
       if(allJoints[i]->atStart == false) {
         //leave atStart == false
       } else {
         atStart = true;
       }
-    }
+    }*/
   }
   Serial.println("At start position");
 }
