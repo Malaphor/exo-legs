@@ -8,6 +8,7 @@ Joint::Joint(int node_id, byte potPin, int potOffset, float *angles, int targetA
   this->potOffset = potOffset;
   this->angles = angles;
   this->targetAngle = targetAngle;
+  this->startAngle = targetAngle;
   this->odriveCANPtr = odriveCANPtr;
 }
 /*

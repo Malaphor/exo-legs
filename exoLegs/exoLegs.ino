@@ -28,15 +28,10 @@ const int numJoints = 4;  //number of active joints
 int led = 13;
 
 //program advancement variables
-bool readyToMove = false;  //no errors, is everything calibrated and homed?
 bool programRunning = false;  //is program running?
 int leftLegTarget = 24;
 int rightLegTarget = 0;
 bool allJointsReady = false;  //are all joints at target angle?
-
-//joint homing, start position, calibration
-bool allJointsHomed = true;  //all joints at 0 degrees?
-bool atStart = true;  //all joints at start angle?
 
 //serial reading
 char inBytes[32];  //array to read in commands via serial
@@ -46,12 +41,6 @@ String optionString = "Options: <x> to clear errors, <c1> to calibrate axis1, <h
 
 //speed variables
 float segTime = 0.314;  //0.0314 time in sec between angle datapoints, walk speed
-float rightHipSpeed = 5.0;  //motor rev/s
-float rightKneeSpeed = 5.0;
-float rightAnkleSpeed = 5.0;
-float leftHipSpeed = 5.0;
-float leftKneeSpeed = 0.5;
-float leftAnkleSpeed = 5.0;
 
 //position variables
 /*int hipMin = 100;  //in counts: -120000;
@@ -178,6 +167,7 @@ void loop() {
           allJointsReady = true;
         } else {  //first joint that's not at target ruins it for everyone
           allJointsReady = false;
+          break;
         }
       }
 
@@ -270,16 +260,14 @@ void readInput() {
 
       joint->Calibrate();
 
-      while(joint->GetCurrentState() != 1) {
+      while(joint->GetCurrentState() != 1) {  //1 is idle
         //wait for calibration to finish
       }
-      joint->GetErrors(errorVals);
-      joint->ClosedLoopCtrl();
-      delay(1 / 7999);
-      if(joint->GetCurrentState() != 1) {
-        checkJointErrors(joint);
+      checkJointErrors(joint);
+      if(isError == true) {
+        return;
       } else {
-        allJoints[inBytes[1]]->calibrated = true;
+        joint->calibrated = true;
         Serial << "Calibration successful" << '\n';
       }
       doneReading = false;
@@ -297,31 +285,49 @@ void readInput() {
           problem = true;
         }
       }
-      if(problem) {
+      if(problem == true) {
         Serial.println(optionString);
         doneReading = false;
         return;
       }
       for(int i = 0;i < numJoints;i++) {
         if(allJoints[i]->homed == false) {
-          Serial << "Not all joints are homed. Homing joint..." << '\n';
+          Serial << "Not all joints are homed. Homing joints..." << '\n';
           homeJoints();
+          if(isError == true) {
+            return;
+          } else {
+            break;
+          }
         }
       }
-      if(!atStart) {
-        Serial.println("Moving joints to start position...");
-        toStartPosition();
-      } else {
-        for(int i = 0;i < numJoints;i++) {
-          odriveCAN.RunState(allJoints[i]->node_id, ODriveTeensyCAN::AXIS_STATE_CLOSED_LOOP_CONTROL);
+      for(int i = 0;i < numJoints;i++) {
+        if(allJoints[i]->atStart == false) {
+          Serial.println("Moving joints to start position...");
+          toStartPosition();
+          if(isError == true) {
+            return;
+          } else {
+            break;
+          }
         }
+      }
+      for(int i = 0;i < numJoints;i++) {
+        allJoints[i]->ClosedLoopCtrl();
+        delay(1 / 7999);
+        if(allJoints[i]->GetCurrentState() != 8) {
+          Serial << jointNames[i] << " failed to enter closed loop control" << '\n';
+          checkJointErrors(allJoints[i]);
+        }
+      }
+      if(isError == false) {
         Serial.println("Starting program");
-        delay(500);
-        programRunning = true;
+          delay(500);
+          programRunning = true;
       }
     } else if(inBytes[0] = 'h') {  //home joints
       Serial.println("Homing joints...");
-      //homeAllJoints();
+      homeJoints();
     }
     doneReading = false;
   }
@@ -355,37 +361,48 @@ void checkJointErrors(Joint *joint) {
   }
 }
 
-void homeJoint() {
+void homeJoints() {
   if(!isError) {
     checkForErrors();
   } else {
     return;
   }
   float posDiff = 0;  //difference between current & home pos in revs
-  
-  odriveCAN.SetVelocityLimit(joint->node_id, 6.0);  //velocity limit = 6revs/s
-  if(odriveCAN.GetCurrentState(joint->node_id) != 8) {  //8 is closed loop control
-    odriveCAN.RunState(joint->node_id, ODriveTeensyCAN::AXIS_STATE_CLOSED_LOOP_CONTROL);
-  }
-  
-  while(!joint->homed) {
-    if(Serial.available()) {
-      readInput();
-      return;
-    }
-    if(!isError) {
-      checkForErrors();
-    } else {
-      return;
-    }
-    
-    posDiff = (joint->GetPotPos() - joint->potOffset) * potValToDeg / 360.0;  //pos diff from deg to revs
-    joint->posEstimate = odriveCAN.GetPosition(joint->node_id);
 
-    if(fabs(posDiff) < posDiffThreshold) {  //if close enough
-      joint->homed = true;
-    } else {
-      odriveCAN.SetPosition(joint->node_id, joint->posEstimate - posDiff);
+  for(int i = 0;i < numJoints;i++) {
+    allJoints[i]->SetVelocityLimit(6.0);  //velocity limit = 6revs/s
+    if(allJoints[i]->GetCurrentState() != 8) {  //8 is closed loop control
+      allJoints[i]->ClosedLoopCtrl();
+      delay(1 / 7999);
+      if(allJoints[i]->GetCurrentState() != 8) {
+        checkJointErrors(allJoints[i]);
+      }
+    }
+  }
+  if(isError == true) {
+    return;
+  }
+
+  for(int i = 0;i <numJoints;i++) {
+    if(allJoints[i]->homed == false) {
+      if(Serial.available()) {
+        readInput();
+        return;
+      }
+      if(!isError) {
+        checkForErrors();
+      } else {
+        Serial << "Homing sequence failed" << '\n';
+        return;
+      }
+    
+      posDiff = (allJoints[i]->GetPotPos() - allJoints[i]->potOffset) * potValToDeg / 360.0;  //pos diff from deg to revs
+
+      if(fabs(posDiff) < posDiffThreshold) {  //if close enough
+        allJoints[i]->homed = true;
+      } else {
+        allJoints[i]->SetPosition(allJoints[i]->GetPosition() - posDiff);
+      }
     }
   }
   Serial.println("Homing sequence completed");
@@ -399,42 +416,44 @@ void toStartPosition() {
   }
 
   for(int i = 0;i < numJoints;i++) {
-    odriveCAN.SetVelocityLimit(allJoints[i]->node_id, 6.0);
-    if(odriveCAN.GetCurrentState(allJoints[i]->node_id) != 8) {  //8 is closed loop control
-      odriveCAN.RunState(allJoints[i]->node_id, ODriveTeensyCAN::AXIS_STATE_CLOSED_LOOP_CONTROL);
+    allJoints[i]->SetVelocityLimit(6.0);
+    if(allJoints[i]->GetCurrentState() != 8) {  //8 is closed loop control
+      allJoints[i]->ClosedLoopCtrl();
+      delay(1 / 7999);
+      if(allJoints[i]->GetCurrentState() != 8) {
+        Serial << jointNames[i] << " failed to enter closed loop control" << '\n';
+        checkJointErrors(allJoints[i]);
+      }
+    }
+  }
+  if(isError == true) {
+    return;
+  }
+
+  for(int i = 0;i < numJoints;i++) {
+    allJoints[i]->targetAngle = allJoints[i]->startAngle;
+  }
+
+  for(int i = 0;i < numJoints;i++) {
+    if(allJoints[i]->atStart == false) {
+      if(Serial.available()) {
+        readInput();
+        return;
+      }
+      if(!isError) {
+        checkForErrors();
+      } else {
+        Serial << "Failed to move joints to start position" << '\n';
+        return;
+      }
+    
+      if(fabs(allJoints[i]->GetPosition() - allJoints[i]->GetTargetPosition()) <= posDiffThreshold) {
+        allJoints[i]->atStart = true;
+      } else {
+        allJoints[i]->SetPosition(allJoints[i]->GetTargetPosition());
+      }
     }
   }
   
-  while(!atStart) {
-    if(Serial.available()) {
-      readInput();
-      return;
-    }
-    if(!isError) {
-      checkForErrors();
-    } else {
-      return;
-    }
-
-    for(int i = 0;i < numJoints;i++) {
-      if(allJoints[i]->atStart == false) {
-        allJoints[i]->posEstimate = odriveCAN.GetPosition(allJoints[i]);
-    
-        if(fabs(allJoints[i]->posEstimate - (allJoints[i]->angles[0] / 360.0)) <= posDiffThreshold) {
-          allJoints[i]->atStart = true;
-        } else {
-          odriveCAN.SetPosition(allJoints[i]->node_id, allJoints[i]->angles[0] / 360.0);
-        }
-      }
-    }
-/*
-    for(int i = 0;i < numJoints;i++) {
-      if(allJoints[i]->atStart == false) {
-        //leave atStart == false
-      } else {
-        atStart = true;
-      }
-    }*/
-  }
   Serial.println("At start position");
 }

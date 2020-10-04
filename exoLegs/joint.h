@@ -13,6 +13,7 @@ class Joint {
     byte potPin;
     int potOffset;  //val of pot when joint at 0deg
     int targetAngle;
+    int startAngle;
     float targetPosition;
     float targetVelocity = 6.0;  //slow start speed limit, just in case
     float posEstimate = 0.0;  //encoder reading in revs
