@@ -24,7 +24,7 @@ There are 6 active joints, 1 for each hip, knee and ankle. All of the joint actu
 
 A Teensy 4 MCU controls 3 v3.6 24V ODrives with a [SN65HVD230](https://www.ti.com/product/SN65HVD230) CAN transciever break out board operating at 1Mbps for communicating between them. Each ODrive controls 2 motors with an AS5047P eval board in ABI mode for motor commutation. An NTC 3950 thermistor was attached to the motor stator with thermal epoxy and wired into the ODrive to prevent overheating. The output of each joint also has a 3-turn potentiometer (3547S-1AA-103A) that measures the joint position with voltage feedback from 0V (min angle) to 3.3V (max angle). Motor position given by the AS5047P multiplied by the gear ratio gives joint position for the gait while the potentiometer is used for getting the startup position and homing each of the joints. Power to the system is currently supplied by a generic PSU like that you might find on a 3D printer.
 
-![Electrical Diagram](/Documentation/electricalDiagram.jpg)
+![Electric Diagram](/Documentation/electricDiagram.jpg)
 
 *Note: If you're connecting an ODrive or Teensy to a PC a USB isolator is recommended
 
