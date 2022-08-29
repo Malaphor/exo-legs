@@ -36,6 +36,6 @@ The initial control strategy is meant to be pretty straightforward. For each joi
 
 The GUI is meant to stream data from the Teensy and display various data such as each joint position, speed and torque as well as give the user control over their movement.
 
-![Exoskeleton GUI](/Code/GUI/interface.png)
+![Exoskeleton GUI](/Code/GUI/interface.PNG)
 
 The buttons at the top can start, stop and home all of the joints. Graphs to either side display real time position data of each joint and the pair of legs between the graphs are animated to show the gait. Below the animated gait is a table that shows angular velocity and torque. The user can increase or decrease walking speed and how much body weight is supported by their own legs versus how much is supported by the list. Lastly, a console is provided to show debug information such as errors from the motor controllers, the Teensy or if communication gets interrupted.
