@@ -22,7 +22,7 @@ There are 6 active joints, 1 for each hip, knee and ankle. All of the joint actu
 
 # Electronics
 
-A Teensy 4 MCU controls 3 v3.6 24V ODrives with a [SN65HVD230](https://www.ti.com/product/SN65HVD230) CAN transciever break out board operating at 1Mbps for communicating between them. Each ODrive controls 2 motors with an AS5047P eval board in ABI mode for motor commutation. An NTC 3950 thermistor was attached to the motor stator with thermal epoxy and wired into the ODrive to prevent overheating. The output of each joint also has a 3-turn potentiometer (3547S-1AA-103A) that measures the joint position with voltage feedback from 0V (min angle) to 3.3V (max angle). Motor position given by the AS5047P multiplied by the gear ratio gives joint position for the gait while the potentiometer is used for getting the startup position and homing each of the joints. Power to the system is currently supplied by a generic PSU like that you might find on a 3D printer.
+A Teensy 4 MCU controls 3 v3.6 24V ODrives with a [SN65HVD230](https://www.ti.com/product/SN65HVD230) CAN transciever break out board operating at 1Mbps for communicating between them. Each ODrive controls 2 motors with an AS5047P eval board in ABI mode for motor commutation. An NTC 3950 thermistor was attached to the motor stator with thermal epoxy and wired into the ODrive to prevent overheating. The output of each joint also has a 3-turn potentiometer ([3547S-1AA-103A](https://www.mouser.com/datasheet/2/54/3547-776151.pdf)) that measures the joint position with voltage feedback from 0V (min angle) to 3.3V (max angle). Motor position given by the AS5047P multiplied by the gear ratio gives joint position for the gait while the potentiometer is used for getting the startup position and homing each of the joints. Power to the system is currently supplied by a generic PSU like that you might find on a 3D printer.
 
 ![Electric Diagram](/Documentation/electricDiagram.jpg)
 
@@ -31,3 +31,11 @@ A Teensy 4 MCU controls 3 v3.6 24V ODrives with a [SN65HVD230](https://www.ti.co
 # Software
 
 The initial control strategy is meant to be pretty straightforward. For each joint there's an array of 50 data points (from The Biomechanics and Motor Control of Human Gait, Winter 1987) that get looped through and sent to the ODrives as position commands. There's a separate header and implementation file that defines a Joint object which is used to keep track of various data related to each hip, knee and ankle joint. A section of the code is dedicated to reading CAN messages from the ODrives with the help of the ODriveTeensyCAN library. Data transfer between the Teensy and a PC is split into 2 types: GUI and not GUI (controlled by a variable definition). When in GUI mode data and commands are sent back and forth between the Teensy and the GUI. Otherwise you may use the Arduino console to input commands and read debug info. The code is well commented to make it easier to follow along.
+
+## GUI
+
+The GUI is meant to stream data from the Teensy and display various data such as each joint position, speed and torque as well as give the user control over their movement.
+
+![Exoskeleton GUI](/Code/GUI/interface.png)
+
+The buttons at the top can start, stop and home all of the joints. Graphs to either side display real time position data of each joint and the pair of legs between the graphs are animated to show the gait. Below the animated gait is a table that shows angular velocity and torque. The user can increase or decrease walking speed and how much body weight is supported by their own legs versus how much is supported by the list. Lastly, a console is provided to show debug information such as errors from the motor controllers, the Teensy or if communication gets interrupted.
