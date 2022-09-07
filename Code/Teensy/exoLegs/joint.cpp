@@ -3,7 +3,7 @@
 float motorGearRatio = 120.0;
 float potGearRatio = 4.09;  //1.715V @ 0deg, 2.475V @ 90deg, 3.3/4 = 0.825, 0.825/90 = 0.0091V per deg
 
-Joint::Joint(int node_id, byte potPin, int potOffset, float *angles, int targetAngle, ODriveTeensyCAN *odriveCANPtr) {
+Joint::Joint(uint32_t node_id, byte potPin, int potOffset, float *angles, int targetAngle, ODriveTeensyCAN *odriveCANPtr) {
   this->node_id = node_id;  //odrive axis CAN node id
   this->potPin = potPin;  //gpio pin on odrive
   this->potOffset = potOffset;  //val of pot in volts when joint at 0deg
@@ -15,14 +15,6 @@ Joint::Joint(int node_id, byte potPin, int potOffset, float *angles, int targetA
 
 void Joint::ClearErrors() {
   odriveCANPtr->ClearErrors(this->node_id);
-}
-
-void Joint::GetErrors(uint64_t errorVals[3]) {
-  memset(errorVals, 0, sizeof(errorVals));  //sets all values to 0
-  
-  errorVals[0] = odriveCANPtr->GetMotorError(this->node_id);
-  errorVals[1] = odriveCANPtr->GetEncoderError(this->node_id);
-  errorVals[2] = odriveCANPtr->GetAxisError(this->node_id);
 }
 
 void Joint::Calibrate() {
@@ -37,14 +29,14 @@ void  Joint::StopMotion() {
   odriveCANPtr->RunState(this->node_id, ODriveTeensyCAN::AXIS_STATE_IDLE);
 }
 
-float Joint::GetPotVal() {
-  return odriveCANPtr->GetADCVoltage(this->node_id, this->potPin);
+void Joint::GetPotVal() {
+  odriveCANPtr->GetADCVoltage(this->node_id, this->potPin);
 }
-
+/*
 float Joint::GetPosition() {
   this->posEstimate = odriveCANPtr->GetPosition(this->node_id);  //encoder position in revs
   return this->posEstimate;
-}
+}*/
 
 float Joint::GetTargetPosition() {
   this->targetPosition = this->angles[this->targetAngle] * motorGearRatio / 360.0;  //target encoder position in revs
@@ -52,16 +44,12 @@ float Joint::GetTargetPosition() {
 }
 
 float Joint::GetVelocity() {
-  return odriveCANPtr->GetVelocity(this->node_id) * 360 / motorGearRatio;  //output joint velocity
+  return this->velEstimate * 360 / motorGearRatio;  //output joint velocity
 }
-
-uint32_t Joint::GetCurrentState() {
-  return odriveCANPtr->GetCurrentState(this->node_id);
-}
-
+/*
 float Joint::GetIqMeasured() {
   return odriveCANPtr->GetIqMeasured(this->node_id);
-}
+}*/
 
 void Joint::SetControlMode(int control_mode) {
   odriveCANPtr->SetControllerModes(this->node_id, control_mode, 1);  //1 == input mode passthrough

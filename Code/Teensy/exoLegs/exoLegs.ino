@@ -19,19 +19,19 @@ template<>        inline Print& operator <<(Print &obj, float arg) { obj.print(a
 
 //const float potValToDeg = 0.009;  //convert pot voltage to degrees
 const float homePotVal = 1.62;  //value of joint pot when joint angle == 0, in volts
-const int rightHipOffset = 0;  //pot voltage when knee is at 0deg
+const int rightHipOffset = 0;  //pot voltage when hip is at 0deg
 const int rightKneeOffset = 1.71;  //pot voltage when knee is at 0deg
-const int rightAnkleOffset = 459;  //pot voltage when knee is at 0deg
-const int leftHipOffset = 0;  //pot voltage when knee is at 0deg
+const int rightAnkleOffset = 459;  //pot voltage when ankle is at 0deg
+const int leftHipOffset = 0;  //pot voltage when hip is at 0deg
 const int leftKneeOffset = 989;  //pot voltage when knee is at 0deg
-const int leftAnkleOffset = 459;  //pot voltage when knee is at 0deg
+const int leftAnkleOffset = 459;  //pot voltage when ankle is at 0deg
 const float posDiffThreshold = 0.02;  //how close to target voltage before its ready, in volts or revs
 const float motorCurrentLimit = 10.0;  //max motor current
 const int numJoints = 1;  //number of active joints, used for testing
 
 const float stateChangeTime = 1.0 / 799.0;  //time to wait for odrive axis to change states
-int led = 13;
-int ledState = LOW;
+int led = 13;  //onboard led pin
+int ledState = LOW;  //LOW = off. Keep track of LED state
 
 //program advancement variables
 bool programRunning = false;  //is program running?
@@ -43,27 +43,18 @@ bool allJointsHomed = false;  //homing sequence completed for all joints
 //serial reading
 char inBytes[32];  //array to read in commands via serial, could probably be smaller
 bool doneReading = false;  //finished reading cmd via serial?
-float inVal = 0;  //manual pos cmd via serial
+float inVal = 0;  //manual pos cmd via serial. Not implemented
 String optionString = "Options: <x> to clear errors, <c1> to calibrate axis1, <h> to home joints, <p> to start position, <r> to run program, <s> to stop";
 
 //data transfer
-String dataToSend = "";
-String errorString = "";
+String dataToSend = "";  //string of data values to send to gui
+String errorString = "";  //string of all current errors to send to gui
 unsigned long contactTimer = 0;
 
 //speed & weight variables
-float segTime = 0.0314;  //0.0314 time in sec between angle datapoints, effects walk speed
+float segTime = 0.0314;  //0.0314 time in sec between angle datapoints, affects walk speed
 float weight = 53.0;  //body weight in kg, measured by current draw
 float bodyWeight = 50.0;  //% body weight supported by lift
-
-//position variables
-/*int hipMin = 100;  //in counts: -120000;
-int hipMax = 150;  //in counts: 40000;
-int kneeMin = 100;  //in counts: -6667;
-int kneeMax = 150;  //in counts: 120000;
-int ankleMin = 570;  //in counts: -33333;
-int ankleMax = 250;  //in counts: 26666;
-*/
 
 //error variables
 uint64_t errorVals[3] = {0, 0, 0};  //initialize errors to 0, no errors
@@ -72,6 +63,8 @@ uint64_t motorError = 0;  //64bit motor error
 uint32_t encoderError = 0;  //32bit encoder error
 uint32_t currentState = 1;  //1 == IDLE
 bool isError = false;  //is there currently an error?
+
+unsigned long canMsgTimeout = 0;  //used to wait for CAN message response
 
 //positive angle is flexion, negative is extension
 float hipAngles[] = {19.33, 18.92, 18.45, 17.94, 17.3, 16.4, 15.18, 13.67, 11.97, 10.21, 8.48, 6.74, 4.94, 3.13, 1.42,
@@ -94,16 +87,20 @@ float *kneeAnglesPtr = kneeAngles;  //pointer to float array
 float *ankleAnglesPtr = ankleAngles;  //pointer to float array
 
 
-ODriveTeensyCAN odriveCAN(1000000);  //CAN bus object
+ODriveTeensyCAN odriveCAN(1000000);  //CAN bus object initialized with speed of 1Mbps
 ODriveTeensyCAN *odriveCANPtr = &odriveCAN;  //pointer to CAN bus object
+CAN_message_t inMsg;  //incoming CAN message
+HeartbeatMsg_t returnVals;  //struct that holds heartbeat message data
+EncoderEstimatesMsg_t encoderEstimates;  //struct that holds encoder data
+IqMsg_t iqVals;  //struct that holds current setpoint and measured current
 
 //joint objects
-Joint leftKnee(1, leftPosPinKnee, leftKneeOffset, kneeAnglesPtr, 24, odriveCANPtr);  //CAN node_id, potPin, offset, angles array, leg starting target, CANbus
-Joint leftAnkle(0, leftPosPinAnkle, leftAnkleOffset, ankleAnglesPtr, 24, odriveCANPtr);
-Joint rightKnee(2, rightPosPinKnee, rightKneeOffset, kneeAnglesPtr, 0, odriveCANPtr);
-Joint rightAnkle(3, rightPosPinAnkle, rightAnkleOffset, ankleAnglesPtr, 0, odriveCANPtr);
-Joint leftHip(4, leftPosPinHip, leftHipOffset, hipAnglesPtr, 24, odriveCANPtr);
-Joint rightHip(5, rightPosPinHip, rightHipOffset, hipAnglesPtr, 0, odriveCANPtr);
+Joint leftKnee(0, leftPosPinKnee, leftKneeOffset, kneeAnglesPtr, leftLegTarget, odriveCANPtr);  //CAN node_id, potPin, offset, angles array, leg starting target, CANbus
+Joint leftAnkle(1, leftPosPinAnkle, leftAnkleOffset, ankleAnglesPtr, leftLegTarget, odriveCANPtr);
+Joint rightKnee(2, rightPosPinKnee, rightKneeOffset, kneeAnglesPtr, rightLegTarget, odriveCANPtr);
+Joint rightAnkle(3, rightPosPinAnkle, rightAnkleOffset, ankleAnglesPtr, rightLegTarget, odriveCANPtr);
+Joint leftHip(4, leftPosPinHip, leftHipOffset, hipAnglesPtr, leftLegTarget, odriveCANPtr);
+Joint rightHip(5, rightPosPinHip, rightHipOffset, hipAnglesPtr, rightLegTarget, odriveCANPtr);
 
 //pointers to joint objects
 Joint *leftKneeR = &leftKnee;
@@ -113,29 +110,44 @@ Joint *rightAnkleR = &rightAnkle;
 Joint *leftHipR = &leftHip;
 Joint *rightHipR = &rightHip;
 
-Joint *allJoints[] = {leftAnkleR, leftKneeR, leftHipR, rightAnkleR, rightKneeR, rightHipR};  //array of pointers to joint objects
+Joint *allJoints[] = {leftKneeR, leftAnkleR, rightKneeR, rightAnkleR, leftHipR, rightHipR};  //array of pointers to joint objects for looping
 
-//names corresponding to joint objects. Must be in the same order as allJoints[]
-const char *jointNames[] = {"Left ankle", "Left knee", "Left hip", "Right ankle", "Right knee", "Right hip"};  
+//names corresponding to joint objects. Must be in the same order as allJoints[]. For error reporting/debug
+const char *jointNames[] = {"Left knee", "Left ankle", "Right knee", "Right ankle", "Left hip", "Right hip"};  
 
 void setup() {
   // put your setup code here, to run once:
   Serial.begin(9600);  //start Serial monitor
   pinMode(led, OUTPUT);  //led pin as output
   digitalWrite(led, HIGH);  //turn on led
-  ledState = HIGH;
-  
+  ledState = HIGH;  //update LED state
+
+  contactTimer = millis();
   while(!Serial) {
     //wait for computer serial connection
+    if(millis() - contactTimer > 5000) {
+      break;
+    }
   }
   delay(100);  //brief pause
 
   #ifdef DEBUG  //debug var to help see code stages
   Serial.println("hey1");
   for(int i = 0;i < numJoints;i++) {  //step through array of joints
-    Serial << odriveCAN.Heartbeat() << '\n';  //print heartbeat
+    //Serial << odriveCAN.Heartbeat() << '\n';  //rewrite to wait for specific heartbeat
   }
   #endif
+  
+  do {  //do this first
+    if(odriveCAN.ReadMsg(inMsg)) {  //if theres a message on the CAN bus
+      uint32_t axis_id = inMsg.id >> 6;  //get axis id
+      uint8_t cmd_id = inMsg.id & 0x01F;  //get command id
+      if(cmd_id == ODriveTeensyCAN::CMD_ID_ODRIVE_HEARTBEAT_MESSAGE) {  //if command id is for heartbeat message
+        handleCANMsg(axis_id, inMsg, allJoints[axis_id]);  //take care of it
+        break;  //exit do while loop
+      }  //end if
+    }  //end do
+  } while(millis() - canMsgTimeout < 2000);  //only loop for 2sec
 
   delay(100);  //brief pause
   /*for(int i = 0;i < numJoints;i++) {  //step through array of joints
@@ -166,10 +178,10 @@ void setup() {
     delay(100);  //brief pause
   }*/
 
-  #ifdef GUI
-    establishContact();
-    sendData();
-  #else
+  #ifdef GUI  //if using gui
+    establishContact();  //handshake with gui comp
+    sendData();  //send bool, pos, vel, current updates
+  #else  //if using serial monitor
     Serial.println("Setup Complete");  //done trying to get all joints into closed loop control
     Serial.println(optionString);  //print available options for user to select
   #endif
@@ -181,17 +193,17 @@ void loop() {  //main control loop
     if(millis() - contactTimer > 10000) {  //if > 10sec since last contact check
       establishContact();  //check connection
     } else {
-      sendData();
+      sendData();  //send bool, pos, vel, current updates
     }
   #endif
 
-  if(ledState == HIGH) {
-    digitalWrite(led, LOW);
-    ledState = LOW;
-  } else {
-    digitalWrite(led, HIGH);
-    ledState = HIGH;
-  }
+  if(ledState == HIGH) {  //if led is on
+    digitalWrite(led, LOW);  //turn it off
+    ledState = LOW;  //update
+  } else {  //if led is off
+    digitalWrite(led, HIGH);  //turn it on
+    ledState = HIGH;  //update
+  }  //end if else
   
   if(Serial.available()) {  //if a command has been sent via serial
     Serial.println("incoming");  //alert user
@@ -200,7 +212,7 @@ void loop() {  //main control loop
   }
   
   if(programRunning == true && isError == false) {  //has to both be program running and no errors
-    #ifdef GO
+    #ifdef DEBUG
       Serial.println("programRunning == true && !isError");  //helpful to see program progression
     #endif
 
@@ -270,20 +282,15 @@ void sendData() {  //send bool, pos, vel, current updates
   }
   dataToSend += ",";
   for(int i = 0;i < 6;i++) {
-    if(programRunning) {
-      dataToSend += allJoints[i]->GetPosition();
-      dataToSend += ",";
-    } else {
-      dataToSend += allJoints[i]->posEstimate;
-      dataToSend += ",";
-    }
-  }
-  for(int i = 0;i < 6;i++) {
-    dataToSend += allJoints[i]->GetIqMeasured();
+    dataToSend += allJoints[i]->posEstimate;
     dataToSend += ",";
   }
   for(int i = 0;i < 6;i++) {
-    dataToSend += allJoints[i]->GetVelocity();
+    dataToSend += allJoints[i]->iqMeasured;
+    dataToSend += ",";
+  }
+  for(int i = 0;i < 6;i++) {
+    dataToSend += allJoints[i]->velEstimate;
     dataToSend += ",";
   }
   //dataToSend
@@ -293,13 +300,13 @@ void sendData() {  //send bool, pos, vel, current updates
 
 void moveJoint(Joint *joint) {  //move joint to target position
   if(joint->readyToMove == false) {  //if joint has yet to reach target position
-    joint->posEstimate = joint->GetPosition();  //motor position / gear ratio. Data stored in posEstimate
+    //joint->posEstimate = joint->GetPosition();  //motor position / gear ratio. Data stored in posEstimate
     float absDiff = (joint->posEstimate - joint->GetTargetPosition());  //difference between current position and target position in motor revs
-    #ifdef GO  //for debugging
+    #ifdef DEBUG  //for debugging
       Serial << "Pos est: " << joint->posEstimate << ", Target: " << joint->targetAngle <<
              "(" << joint->GetTargetPosition() << ")" << '\n';  //print current and target positions
       Serial << "Velocity: " << joint->GetVelocity() << "Pos diff: " << fabs(absDiff) << '\n';  //print joint output velocity and position difference
-      Serial << "Target velocity: " << joint->targetVelocity << '\n';
+      //Serial << "Target velocity: " << joint->targetVelocity << '\n';
     #endif
     /*
     if(joint->targetAngle == 0) {
@@ -364,22 +371,34 @@ void readInput() {  //proccess data input from user
         Serial << "All errors cleared" << '\n';  //celebrate
       }  //end if else
     } else if(inBytes[0] == 'c') {  //calibration sequence
-      Joint *joint = allJoints[inBytes[1]];  //pointer to joint to calibrate
-      
-      joint->calibrated = false;  //reset calibration flag
+      allJoints[inBytes[1]]->calibrated = false;  //reset calibration flag
       Serial << "Calibrating " << jointNames[inBytes[1]] << " joint..." << '\n';  //display which joint is being calibrated
-      joint->Calibrate();  //attempt to calibrate joint
+      allJoints[inBytes[1]]->Calibrate();  //attempt to calibrate joint
 
-      while(joint->GetCurrentState() != 1) {  //1 is idle
+      while(allJoints[inBytes[1]]->currentState != 1) {  //1 is idle. State is also IDLE if theres an error
         //wait for calibration to finish
+        if(odriveCAN.ReadMsg(inMsg)) {  //if theres a message to be read
+          uint32_t axis_id = inMsg.id >> 6;  //get axis id
+          if(axis_id == inBytes[1]) {  //if axis id is same as currently calibrating axis
+            handleCANMsg(axis_id, inMsg, allJoints[axis_id]);  //deal with it
+          }  //end if
+        }  //end if
       }  //end loop
       
-      checkJointErrors(joint);  //check if calibration was successful
+      if(odriveCAN.ReadMsg(inMsg)) {  //if theres a message to be read
+        uint32_t axis_id = inMsg.id >> 6;  //get axis id
+        if(axis_id == inBytes[1]) {  //if axis id is same as currently calibrating axis
+          handleCANMsg(axis_id, inMsg, allJoints[inBytes[1]]);  //deal with it
+        }  //end if
+      }  //end if
+      
+      checkJointErrors(allJoints[inBytes[1]]);  //check if calibration was successful
       if(isError == true) {  //if theres an error
+        Serial.println("Calibration unsuccessful");  //notify user
         Serial.println(optionString);  //print option string again and wait for user input
         return;  //give up. exit function
       } else {  //if theres no error
-        joint->calibrated = true;  //flag joint as calibrated
+        allJoints[inBytes[1]]->calibrated = true;  //flag joint as calibrated
         Serial << "Calibration successful" << '\n';  //alert user of successful calibration
       }  //end if else
     } else if(inBytes[0] == 's') {  //stop everything
@@ -436,10 +455,10 @@ void readInput() {  //proccess data input from user
       Serial << "All active joints at start position" << '\n';
       
       for(int i = 0;i < numJoints;i++) {  //loop through array of joints
-        if(allJoints[i]->GetCurrentState() != 8) {  //if joint is not already in closed loop control
+        if(allJoints[i]->currentState != 8) {  //if joint is not already in closed loop control
           allJoints[i]->ClosedLoopCtrl();  //attempt to put it into closed loop control
           delay(stateChangeTime);  //wait 1 odrive control loop
-          if(allJoints[i]->GetCurrentState() != 8) {  //check if successful. if not
+          if(allJoints[i]->currentState != 8) {  //check if successful. if not
             Serial << jointNames[i] << " failed to enter closed loop control" << '\n';  //alert user
             checkJointErrors(allJoints[i]);  //check joint for errors
           }  //end if
@@ -482,14 +501,12 @@ void readInput() {  //proccess data input from user
 
 void checkForErrors() {  //helper function to check all joints for errors
   for(int i = 0;i < numJoints;i++) {  //loop through array of joints
-    Serial.println("joint errkrs");
-    checkJointErrors(allJoints[i]);  //check each joint for errors
-    Serial.println("jug");
-    #ifdef GUI
-      if(isError) {  //if an error was found
+    if(allJoints[i]->isError) {  //if joint has an error
+      checkJointErrors(allJoints[i]);  //check joint for errors
+      #ifdef GUI
         Serial << '<' << errorString << i << '>' << '\n';  //send errors + joint index wrapped in start/end chars
-      }
-    #endif
+      #endif
+    }  //end if
   }  //end loop
   #ifdef GUI
     errorString = "< , , , ,6>";  //signal end of joint errors
@@ -498,61 +515,97 @@ void checkForErrors() {  //helper function to check all joints for errors
 }
 
 void checkJointErrors(Joint *joint) {  //checks joint for motor, encoder and axis errors and prints them
-  Serial.println("gud");
-  //joint->GetErrors(errorVals);  //get errors from odrive, store in array
-    Serial.println("got errors");
-  if(errorVals[0] != 0 || errorVals[1] != 0 || errorVals[2] != 0) {  //if any error value is nonzero, theres an error
-    programRunning = false;  //change flag to stop program from running
-    isError = true;  //flag the presence of an error
-    #ifdef GUI
-      errorString = jointNames[joint->node_id];  //print which joint has an error
-      errorString += ":,";
-    #else
-      Serial << jointNames[joint->node_id] << ":" << '\n';  //print which joint has an error
-    #endif
-  }  //end if
+
+  odriveCANPtr->GetMotorError(joint->node_id);  //send get motor error message
+  do {  //do this first
+    if(odriveCAN.ReadMsg(inMsg)) {  //if theres a message on the CAN bus
+      uint32_t axis_id = inMsg.id >> 6;  //get axis id
+      uint8_t cmd_id = inMsg.id & 0x01F;  //get command id
+      if(cmd_id == ODriveTeensyCAN::CMD_ID_GET_MOTOR_ERROR && axis_id == joint->node_id) {  //if command id is for motor error message
+        handleCANMsg(axis_id, inMsg, allJoints[axis_id]);  //take care of it
+        break;  //exit do while loop
+      }  //end if
+    }  //end do
+  } while(millis() - canMsgTimeout < 500);  //only loop for 1/2sec
   
-  if(errorVals[0] != 0) {  //if theres a motor error
+  odriveCANPtr->GetEncoderError(joint->node_id);  //send get encoder error message
+  do {  //do this first
+    if(odriveCAN.ReadMsg(inMsg)) {  //if theres a message on the CAN bus
+      uint32_t axis_id = inMsg.id >> 6;  //get axis id
+      uint8_t cmd_id = inMsg.id & 0x01F;  //get command id
+      if(cmd_id == ODriveTeensyCAN::CMD_ID_GET_ENCODER_ERROR && axis_id == joint->node_id) {  //if command id is for motor error message
+        handleCANMsg(axis_id, inMsg, allJoints[axis_id]);  //take care of it
+        break;  //exit do while loop
+      }  //end if
+    }  //end do
+  } while(millis() - canMsgTimeout < 500);  //only loop for 1/2sec
+  
+  odriveCANPtr->GetControllerError(joint->node_id);  //send get controller error message
+  do {  //do this first
+    if(odriveCAN.ReadMsg(inMsg)) {  //if theres a message on the CAN bus
+      uint32_t axis_id = inMsg.id >> 6;  //get axis id
+      uint8_t cmd_id = inMsg.id & 0x01F;  //get command id
+      if(cmd_id == ODriveTeensyCAN::CMD_ID_GET_CONTROLLER_ERROR && axis_id == joint->node_id) {  //if command id is for motor error message
+        handleCANMsg(axis_id, inMsg, allJoints[axis_id]);  //take care of it
+        break;  //exit do while loop
+      }  //end if
+    }  //end do
+  } while(millis() - canMsgTimeout < 500);  //only loop for 1/2sec
+  
+  #ifdef GUI
+    errorString = jointNames[joint->node_id];  //print which joint has an error
+    errorString += ":,";
+  #else
+    Serial << jointNames[joint->node_id] << ":" << '\n';  //print which joint has an error
+  #endif
+  
+  if(joint->motorError != 0) {  //if theres a motor error
     #ifdef GUI
       errorString += "Motor error: ";  //print
-      errorString += int(errorVals[0]);  //display error
+      errorString += int(joint->motorError);  //display error
       errorString +=",";
     #else
       Serial << '\t' << "Motor error: ";  //print
-      Serial.println(motorError, HEX);  //display error in hexadecimal format
+      Serial.println(joint->motorError, HEX);  //display error in hexadecimal format
     #endif
   }  //end if
   
-  if(errorVals[1] != 0) {  //if theres an encoder error
+  if(joint->encoderError != 0) {  //if theres an encoder error
     #ifdef GUI
       errorString += "Encoder error: ";  //print
-      errorString += int(errorVals[1]);  //display error
+      errorString += int(joint->encoderError);  //display error
       errorString += ",";
     #else
       Serial << '\t' << "Encoder error: ";  //print
-      Serial.println(encoderError, HEX);  //display error in hexadecimal format
+      Serial.println(joint->encoderError, HEX);  //display error in hexadecimal format
     #endif
   }  //end if
   
-  if(errorVals[2] !=0) {  //if theres an axis error
+  if(joint->axisError !=0) {  //if theres an axis error
     #ifdef GUI
       errorString += "Axis error: ";  //print
-      errorString += int(errorVals[2]);  //display error
+      errorString += int(joint->axisError);  //display error
       errorString += ",";
     #else
       Serial << '\t' << "Axis error: ";  //print
-      Serial.println(axisError, HEX);  //display error in hexadecimal format
+      Serial.println(joint->axisError, HEX);  //display error in hexadecimal format
+    #endif
+  }  //end if
+  
+  if(joint->controllerError !=0) {  //if theres an axis error
+    #ifdef GUI
+      errorString += "Controller error: ";  //print
+      errorString += int(joint->controllerError);  //display error
+      errorString += ",";
+    #else
+      Serial << '\t' << "Controller error: ";  //print
+      Serial.println(joint->controllerError, HEX);  //display error in hexadecimal format
     #endif
   }  //end if
 }
 
 void homeJoints() {  //move all joints to home position. This will straighten the legs
-  if(!isError) {  //if there are no errors
-    checkForErrors();  //check for some
-    if(isError) {  //if an error is found
-      return;  //exit function
-    }  //end if
-  } else {  //if there is an error
+  if(isError == true) {  //if there is an error
     #ifdef DEBUG
       Serial << "Error" << '\n';
       checkForErrors();
@@ -561,11 +614,11 @@ void homeJoints() {  //move all joints to home position. This will straighten th
   }  //end if else
 
   for(int i = 0;i < numJoints;i++) {  //loop through array of joints
-    allJoints[i]->SetControlMode(2);  //set control mode to velocity control
-    if(allJoints[i]->GetCurrentState() != 8) {  //8 is closed loop control
+    allJoints[i]->SetControlMode(ODriveTeensyCAN::VELOCITY_CONTROL);  //set control mode to velocity control
+    if(allJoints[i]->currentState != ODriveTeensyCAN::AXIS_STATE_CLOSED_LOOP_CONTROL) {  //8 is closed loop control
       allJoints[i]->ClosedLoopCtrl();  //attempt to put joint into closed loop control
       delay(stateChangeTime);  //wait 1 odrive control loop for joint to change state
-      if(allJoints[i]->GetCurrentState() != 8) {  //check if joint made it into closed loop control
+      if(allJoints[i]->currentState != ODriveTeensyCAN::AXIS_STATE_CLOSED_LOOP_CONTROL) {  //check if joint made it into closed loop control
         checkJointErrors(allJoints[i]);  //if not, why?
       }  //end if
     }  //end if
@@ -577,38 +630,44 @@ void homeJoints() {  //move all joints to home position. This will straighten th
 
   for(int i = 0;i < numJoints;i++) {  //loop through array of joints
     if(allJoints[i]->homed == false) {  //if this joint is not at its home position
-      while(allJoints[i]->homed == false) {
+      while(allJoints[i]->homed == false && !isError) {  //while joint is not homed and there are no errors
+        allJoints[i]->GetPotVal();  //query pot voltage from odrive
         if(Serial.available()) {  //check for new user input
           readInput();  //if there is new input, deal with it
           return;  //exit function
         }  //end if
         
-        if(fabs(allJoints[i]->GetPotVal() - homePotVal) < posDiffThreshold) {  //if close enough
+        if(odriveCAN.ReadMsg(inMsg)) {  //if theres a message to be read
+          uint32_t axis_id = inMsg.id >> 6;  //get axis id
+          if(axis_id == allJoints[i]->node_id) {  //if axis id is same as currently homing axis
+            handleCANMsg(axis_id, inMsg, allJoints[i]);  //deal with it
+          }  //end if
+        }  //end if
+        
+        if(fabs(allJoints[i]->potVal - homePotVal) < posDiffThreshold) {  //if close enough
           allJoints[i]->SetVelocity(0);  //stop motion
           allJoints[i]->homed = true;  //joint is at its home position
           allJoints[i]->SetLinearCount(0);  //set encoder position == 0
           allJoints[i]->SetPosition(0);  //set target position == 0
-          allJoints[i]->SetControlMode(3);  //set control mode to position control
-        } else if(allJoints[i]->GetPotVal() < homePotVal) {  //if not close enough
+          allJoints[i]->SetControlMode(ODriveTeensyCAN::POSITION_CONTROL);  //set control mode to position control
+        } else if(allJoints[i]->potVal < homePotVal) {  //if not close enough
           allJoints[i]->SetVelocity(1);  //command joint to turn at 1rev/s
-        } else if(allJoints[i]->GetPotVal() > homePotVal) {  //if not close enough the other direction
+        } else if(allJoints[i]->potVal > homePotVal) {  //if not close enough the other direction
           allJoints[i]->SetVelocity(-1);  //command joint to turn at 1rev/s the other direction
         }  //end if else
       }  //end while
       
-      if(!isError) {  //if there are no errors
+      if(isError) {  //if an error is found
         checkForErrors();  //check for some
-        if(isError) {  //if an error is found
-          #ifdef GUI
-            //do nothing
-          #else
-            Serial << "Homing sequence failed" << '\n';  //alert user
-          #endif
-          return;  //exit function
-        }  //end if isError
+        #ifdef GUI
+          //do nothing
+        #else
+          Serial << "Homing sequence failed" << '\n';  //alert user
+        #endif
+        return;  //exit function
       }  //end if isError
     }  //end if allJoints[i]->homed
-  }  //end loop
+  }  //end for loop
 
   allJointsHomed = true;
   #ifdef GUI
@@ -619,31 +678,29 @@ void homeJoints() {  //move all joints to home position. This will straighten th
 }
 
 void toStartPosition() {  //move all joints to start position
-  if(!isError) {  //if there is no error
-    checkForErrors();  //check for some
-    if(isError) {  //if an error is found
-      return;  //exit function
-    }  //end if
-  } else {  //if there is an error
+  if(isError) {  //if an error is found
     return;  //exit function, dont move
-  }  //end if else
+  }  //end if
 
   for(int i = 0;i < numJoints;i++) {  //loop through array of joints
     allJoints[i]->SetLimits(2.0, 25);  //set a modest velocity. Slow and steady but not low enough to error out
-    if(allJoints[i]->GetCurrentState() != 8) {  //8 is closed loop control
+    if(allJoints[i]->currentState != ODriveTeensyCAN::AXIS_STATE_CLOSED_LOOP_CONTROL) {  //8 is closed loop control
       allJoints[i]->ClosedLoopCtrl();  //attemp to put joint into closed loop control
       delay(stateChangeTime);  //wait 1 odrive control loop to set state
-      if(allJoints[i]->GetCurrentState() != 8) {  //if joint is still not in closed loop control
+      if(allJoints[i]->currentState != ODriveTeensyCAN::AXIS_STATE_CLOSED_LOOP_CONTROL) {  //if joint is still not in closed loop control
         Serial << jointNames[i] << " failed to enter closed loop control" << '\n';  //alert user
         checkJointErrors(allJoints[i]);  //check for errors, print them
+        if(isError == true) {  //if theres an error
+          return;  //exit function, dont move
+        }
       }  //end if currentState != 8
     }  //end if
+    
+    if(odriveCAN.ReadMsg(inMsg)) {  //if theres a message to be read
+      uint32_t axis_id = inMsg.id >> 6;  //get axis id
+      handleCANMsg(axis_id, inMsg, allJoints[i]);  //deal with it
+    }  //end if
   }  //end loop
-
-
-  if(isError == true) {  //if theres an error
-    return;  //exit function, dont move
-  }
 
   for(int i = 0;i < numJoints;i++) {  //loop through array of joints
     if(allJoints[i]->atStart == false) {  //if joint is not yet at start position
@@ -651,22 +708,22 @@ void toStartPosition() {  //move all joints to start position
         readInput();  //if theres user input, deal with it
         return;  //exit function
       }  //end if
+      
+      if(odriveCAN.ReadMsg(inMsg)) {  //if theres a message to be read
+        uint32_t axis_id = inMsg.id >> 6;  //get axis id
+        handleCANMsg(axis_id, inMsg, allJoints[i]);  //deal with it
+      }  //end if
 
-      if(!isError) {  //if there are no errors
-        checkForErrors();  //check for some
-        if(isError) {  //if an error is found
-          return;  //exit function
-        }  //end if
-      } else {  //if there is an error
+      if(isError) {  //if an error is found
         #ifdef GUI
           //do nothing
         #else
           Serial << "Failed to move joints to start position" << '\n';  //alert user
         #endif
         return;  //exit function
-      }  //end if else
+      }  //end if
     
-      if(fabs(allJoints[i]->GetPosition() - allJoints[i]->GetTargetPosition()) <= posDiffThreshold) {  //if joint is close enough to target position
+      if(fabs(allJoints[i]->posEstimate - allJoints[i]->GetTargetPosition()) <= posDiffThreshold) {  //if joint is close enough to target position
         allJoints[i]->atStart = true;  //joint is ready to move to next position
         allJoints[i]->readyToMove = true;  //at target/start position, ready to move to next position
         allJoints[i]->targetAngle++;
@@ -682,3 +739,39 @@ void toStartPosition() {  //move all joints to start position
     Serial.println("At start position");  //if you made it this far, joints are all ready to go
   #endif
 }
+
+void handleCANMsg(int axis_id, CAN_message_t inMsg, Joint *joint) {  //store data received from message
+    uint8_t cmd_id = inMsg.id & 0x01F;  //get message command id
+    
+    switch(cmd_id) {  //test command id
+      case (ODriveTeensyCAN::CMD_ID_ODRIVE_HEARTBEAT_MESSAGE):  //if heartbeat
+        odriveCAN.Heartbeat(returnVals, inMsg);  //store values from inMsg in returnVals struct
+        joint->axisError = returnVals.axisError;  //set joint axis error code
+        joint->currentState = returnVals.currentState;  //set joint current state
+    
+        if(returnVals.motorFlag || returnVals.encoderFlag || returnVals.controllerFlag || joint->axisError != 0) {  //if any errors
+          joint->isError = true;  //set joint error flag
+          programRunning = false;  //dont try to move joints
+        }
+        break;  //exit switch
+      case (ODriveTeensyCAN::CMD_ID_GET_MOTOR_ERROR):  //if getting motor error
+        joint->motorError = odriveCAN.GetMotorErrorResponse(inMsg);  //set joint error code
+        break;  //exit swi tch
+      case (ODriveTeensyCAN::CMD_ID_GET_ENCODER_ERROR):  //if getting encoder error
+        joint->encoderError = odriveCAN.GetEncoderErrorResponse(inMsg);  //set joint error code
+        break;  //exit switch
+      case (ODriveTeensyCAN::CMD_ID_GET_ENCODER_ESTIMATES):  //if getting pos/vel
+        odriveCAN.GetPositionVelocityResponse(encoderEstimates, inMsg);  //store values from inMsg into encoderEstimates struct
+        joint->posEstimate = encoderEstimates.posEstimate;  //set joint position estimate
+        joint->velEstimate = encoderEstimates.velEstimate;  //set joint velocity estimate
+        break;  //exit switch
+      case (ODriveTeensyCAN::CMD_ID_GET_IQ):  //if getting motor current
+        odriveCAN.GetIqResponse(iqVals, inMsg);  //store values
+        break;  //exit switch
+      case (ODriveTeensyCAN::CMD_ID_GET_ADC_VOLTAGE):  //if getting voltage feedback
+        joint->potVal = odriveCAN.GetADCVoltageResponse(inMsg);  //set joint pot value
+        break;  //exit switch
+      default:  //other/unwanted command
+        break;  //exit switch
+    }  //end switch
+}  //end handleCANMsg
