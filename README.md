@@ -30,7 +30,9 @@ A Teensy 4 MCU controls 3 v3.6 24V ODrives with a [SN65HVD230](https://www.ti.co
 
 # Software
 
-The initial control strategy is meant to be pretty straightforward. For each joint there's an array of 50 data points (from The Biomechanics and Motor Control of Human Gait, Winter 1987) that get looped through and sent to the ODrives as position commands. There's a separate header and implementation file that defines a Joint object which is used to keep track of various data related to each hip, knee and ankle joint. A section of the code is dedicated to reading CAN messages from the ODrives with the help of the ODriveTeensyCAN library. Data transfer between the Teensy and a PC is split into 2 types: GUI and not GUI (controlled by a variable definition). When in GUI mode data and commands are sent back and forth between the Teensy and the GUI. Otherwise you may use the Arduino console to input commands and read debug info. The code is well commented to make it easier to follow along.
+The initial control strategy is meant to be pretty straightforward. For each joint there's an array of 50 data points (from The Biomechanics and Motor Control of Human Gait, Winter 1987) that get looped through and sent to the ODrives as position commands. Sending these data points to the ODrive in position control results in choppy motion so filtered position control, command scheduling and cubic spline interpolation is used to smooth out the motion. An Arduino library called [Cubic Spline](https://github.com/avanderg/CubicSpline) handles the interpolation while the ODrive firmware filters the position commands sent from the Teensy at 100Hz. An online tool for visualizing cubic spline interpolation with an explanation of the math behind it can be found [here](https://tools.timodenk.com/cubic-spline-interpolation).
+
+There's a separate header and implementation file that defines a Joint object which is used to keep track of various data related to each hip, knee and ankle joint. A section of the code is dedicated to reading CAN messages from the ODrives with the help of the ODriveTeensyCAN library. Data transfer between the Teensy and a PC is split into 2 types: GUI and not GUI (controlled by a variable definition). When in GUI mode data and commands are sent back and forth between the Teensy and the GUI. Otherwise you may use the Arduino console to input commands and read debug info. The code is well commented to make it easier to follow along.
 
 ## GUI
 
@@ -42,7 +44,7 @@ The buttons at the top can start, stop and home all of the joints. Graphs to eit
 
 # TODO
 
-- Smooth jittery joint motion
+- ~~Smooth jittery joint motion~~
 - Update Teensy code to use threads/tasks
 - Adapt joint design for ankle/footplate
 - Review wiring for ground loops and isolation

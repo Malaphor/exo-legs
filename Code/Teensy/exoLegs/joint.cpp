@@ -44,7 +44,7 @@ float Joint::GetTargetPosition() {
 }
 
 float Joint::GetVelocity() {
-  return this->velEstimate * 360 / motorGearRatio;  //output joint velocity
+  return this->velEstimate * 360 / motorGearRatio;  //output joint velocity in deg/s
 }
 /*
 float Joint::GetIqMeasured() {

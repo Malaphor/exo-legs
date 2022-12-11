@@ -1,13 +1,15 @@
+#include <cube_spline.h>
 #include <FlexCAN_T4.h>
 #include <ODriveTeensyCAN.h>
 #include "Joint.h"
+
 
 // Printing with stream operator
 template<class T> inline Print& operator <<(Print &obj,     T arg) { obj.print(arg);    return obj; }
 template<>        inline Print& operator <<(Print &obj, float arg) { obj.print(arg, 4); return obj; }
 
 //read only and #define
-#define DEBUG 1
+#define DEBUG
 //#define GUI
 //these are now pins on odrive
 #define rightPosPinHip 5  //pin to read pot val for hip pos
@@ -25,8 +27,8 @@ const int rightAnkleOffset = 459;  //pot voltage when ankle is at 0deg
 const int leftHipOffset = 0;  //pot voltage when hip is at 0deg
 const int leftKneeOffset = 989;  //pot voltage when knee is at 0deg
 const int leftAnkleOffset = 459;  //pot voltage when ankle is at 0deg
-const float posDiffThreshold = 0.02;  //how close to target voltage before its ready, in volts or revs
-const float motorCurrentLimit = 10.0;  //max motor current
+const float posDiffThreshold = 0.01;  //0.02how close to target voltage before its ready, in volts or revs
+const float motorCurrentLimit = 15.0;  //max motor current
 const int numJoints = 1;  //number of active joints, used for testing
 
 const float stateChangeTime = 1.0 / 799.0;  //time to wait for odrive axis to change states
@@ -35,10 +37,11 @@ int ledState = LOW;  //LOW = off. Keep track of LED state
 
 //program advancement variables
 bool programRunning = false;  //is program running?
-int leftLegTarget = 24;  //start array index for left leg joints
+int leftLegTarget = 0;  //start array index for left leg joints -------------------- CAHNGE BACK TO 24 -----------------
 int rightLegTarget = 0;  //start array index for right leg joints
 bool allJointsReady = false;  //are all joints at target angle?
 bool allJointsHomed = false;  //homing sequence completed for all joints
+unsigned long sendCmdInterval = 0;
 
 //serial reading
 char inBytes[32];  //array to read in commands via serial, could probably be smaller
@@ -52,7 +55,7 @@ String errorString = "";  //string of all current errors to send to gui
 unsigned long contactTimer = 0;
 
 //speed & weight variables
-float segTime = 0.0314;  //0.0314 time in sec between angle datapoints, affects walk speed
+float segTime = 0.08;  //0.0314;  //0.0314 time in sec between angle datapoints, affects walk speed
 float weight = 53.0;  //body weight in kg, measured by current draw
 float bodyWeight = 50.0;  //% body weight supported by lift
 
@@ -66,18 +69,31 @@ bool isError = false;  //is there currently an error?
 
 unsigned long canMsgTimeout = 0;  //used to wait for CAN message response
 
+//cubic spline interpolation
+S output;  //struct
+S *output_ptr = NULL;  //pointer to struct
+int num_angles = 52;  //needed for cubic spline input
+float csVal = 0;  //val to be interpolated in sec after start of gait
+float csResult = 0;  //output of interpolater, arg of joint->SetPosition()
+int csError = 0;  //checks if value is in domain of dataset
+unsigned long startGaitTime = 0;  //time when gait starts in millis()
+float endGaitTime = segTime * (num_angles - 1) - 0.01;  //total time for gait in sec
+float currentGaitTime = 0;  //time after start of gait in sec
+bool restartGait = true;  //if reached end of gait, restart
+float csXVals[52] = {};  //segTime vals corresponding to joint angles
+
 //positive angle is flexion, negative is extension
-float hipAngles[] = {19.33, 18.92, 18.45, 17.94, 17.3, 16.4, 15.18, 13.67, 11.97, 10.21, 8.48, 6.74, 4.94, 3.13, 1.42,
+float hipAngles[52] = {19.33, 18.92, 18.45, 17.94, 17.3, 16.4, 15.18, 13.67, 11.97, 10.21, 8.48, 6.74, 4.94, 3.13, 1.42,
                      -0.13, -1.54, -2.87, -4.12, -5.3, -6.4, -7.43, -8.39, -9.27, -10.02, -10.61, -10.95, -10.91, -10.31,
                      -9.0, -6.95, -4.25, -1.05, 2.42, 5.93, 9.22, 12.11, 14.55, 16.53, 18.13, 19.45, 20.54, 21.38, 21.84,
-                     21.87, 21.5, 20.84, 20.09, 19.5, 19.18, 19.01
+                     21.87, 21.5, 20.84, 20.09, 19.5, 19.18, 19.01, 19.5
                     };
-float kneeAngles[] = {3.97, 7.0, 10.52, 14.12, 17.38, 19.84, 21.27, 21.67, 21.22, 20.20, 18.86, 17.35, 15.73, 14.08, 12.5,
+float kneeAngles[52] = {3.97, 7.0, 10.52, 14.12, 17.38, 19.84, 21.27, 21.67, 21.22, 20.20, 18.86, 17.35, 15.73, 14.08, 12.5,
                       11.09, 9.91, 8.97, 8.28, 7.86, 7.72, 7.94, 8.6, 9.76, 11.5, 13.86, 16.97, 20.96, 26.0, 32.03, 38.74,
                       45.6, 52.05, 57.54, 61.66, 64.12, 64.86, 63.95, 61.59, 57.97, 53.27, 47.58, 40.94, 33.46, 25.38,
-                      17.27, 9.94, 4.31, 1.12, 0.54, 2.21
+                      17.27, 9.94, 4.31, 1.12, 0.54, 2.21, 4
                      };
-float ankleAngles[] = {0.02, -2.06, -3.88, -4.6, -3.98, -2.4, -0.45, 1.45, 3.04, 4.27, 5.13, 5.71, 6.1, 6.43, 6.76, 7.12,
+float ankleAngles[51] = {0.02, -2.06, -3.88, -4.6, -3.98, -2.4, -0.45, 1.45, 3.04, 4.27, 5.13, 5.71, 6.1, 6.43, 6.76, 7.12,
                        7.54, 7.99, 8.44, 8.86, 9.23, 9.51, 9.62, 9.43, 8.7, 7.2, 4.69, 1.15, -3.26, -8.17, -13.05, -17.13,
                        -19.52, -19.77, -18.12, -15.29, -12.04, -8.85, -5.96, -3.51, -1.64, -0.5, -0.07, -0.16, -0.42, -0.52,
                        -0.26, 0.36, 1.0, 1.2, 0.58
@@ -94,8 +110,8 @@ HeartbeatMsg_t returnVals;  //struct that holds heartbeat message data
 EncoderEstimatesMsg_t encoderEstimates;  //struct that holds encoder data
 IqMsg_t iqVals;  //struct that holds current setpoint and measured current
 
-//joint objects
-Joint leftKnee(0, leftPosPinKnee, leftKneeOffset, kneeAnglesPtr, leftLegTarget, odriveCANPtr);  //CAN node_id, potPin, offset, angles array, leg starting target, CANbus
+//joint objects ---------------------------change kneeAnglesPtr
+Joint leftKnee(0, leftPosPinKnee, leftKneeOffset, hipAnglesPtr, leftLegTarget, odriveCANPtr);  //CAN node_id, potPin, offset, angles array, leg starting target, CANbus
 Joint leftAnkle(1, leftPosPinAnkle, leftAnkleOffset, ankleAnglesPtr, leftLegTarget, odriveCANPtr);
 Joint rightKnee(2, rightPosPinKnee, rightKneeOffset, kneeAnglesPtr, rightLegTarget, odriveCANPtr);
 Joint rightAnkle(3, rightPosPinAnkle, rightAnkleOffset, ankleAnglesPtr, rightLegTarget, odriveCANPtr);
@@ -115,9 +131,10 @@ Joint *allJoints[] = {leftKneeR, leftAnkleR, rightKneeR, rightAnkleR, leftHipR, 
 //names corresponding to joint objects. Must be in the same order as allJoints[]. For error reporting/debug
 const char *jointNames[] = {"Left knee", "Left ankle", "Right knee", "Right ankle", "Left hip", "Right hip"};  
 
+
 void setup() {
   // put your setup code here, to run once:
-  Serial.begin(9600);  //start Serial monitor
+  Serial.begin(115200);  //start Serial monitor
   pinMode(led, OUTPUT);  //led pin as output
   digitalWrite(led, HIGH);  //turn on led
   ledState = HIGH;  //update LED state
@@ -132,10 +149,10 @@ void setup() {
   delay(100);  //brief pause
 
   #ifdef DEBUG  //debug var to help see code stages
-  Serial.println("hey1");
-  for(int i = 0;i < numJoints;i++) {  //step through array of joints
-    //Serial << odriveCAN.Heartbeat() << '\n';  //rewrite to wait for specific heartbeat
-  }
+    Serial.println("Waiting for heartbeat");
+    for(int i = 0;i < numJoints;i++) {  //step through array of joints
+      //Serial << odriveCAN.Heartbeat() << '\n';  //rewrite to wait for specific heartbeat
+    }
   #endif
   
   do {  //do this first
@@ -178,6 +195,11 @@ void setup() {
     delay(100);  //brief pause
   }*/
 
+  fillSegTimeArray();  //fill array w/time vals corresponding to angles
+  output.x = csXVals;  //initial x values
+  output.y = ankleAngles;  //initial y values
+  output_ptr = nat_cubic_spline(num_angles, &output);  //performs natural cubic spline of given dataset
+
   #ifdef GUI  //if using gui
     establishContact();  //handshake with gui comp
     sendData();  //send bool, pos, vel, current updates
@@ -185,6 +207,8 @@ void setup() {
     Serial.println("Setup Complete");  //done trying to get all joints into closed loop control
     Serial.println(optionString);  //print available options for user to select
   #endif
+
+  sendCmdInterval = millis();
 }
 
 void loop() {  //main control loop
@@ -206,19 +230,56 @@ void loop() {  //main control loop
   }  //end if else
   
   if(Serial.available()) {  //if a command has been sent via serial
-    Serial.println("incoming");  //alert user
+    //Serial.println("incoming");  //alert user
     readInput();  //process command
     return;  //skip the rest of the main loop and start over
   }
+
+  if(odriveCAN.ReadMsg(inMsg)) {  //if theres a message to be read
+    #ifdef DEBUGg
+      Serial.println("CAN message");
+    #endif
+    uint32_t axis_id = inMsg.id >> 5;  //get axis id
+    /*Serial.print(inMsg.id);
+    Serial.print("\t");
+    Serial.println(axis_id);*/
+    if(axis_id == 0) {
+      handleCANMsg(axis_id, inMsg, allJoints[axis_id]);  //deal with it
+    }
+  }  //end if
   
   if(programRunning == true && isError == false) {  //has to both be program running and no errors
-    #ifdef DEBUG
+    #ifdef DEBUGg
       Serial.println("programRunning == true && !isError");  //helpful to see program progression
+      Serial.println(leftKnee.readyToMove, allJointsReady);
     #endif
 
+    if(millis() - sendCmdInterval > 10) {  //run code inside every 10ms (100Hz)
+    
     for(int i = 0;i < numJoints;i++) {  //loop through array of joints
-      moveJoint(allJoints[i]);  //move each joint to next position
+      //moveJoint(allJoints[i]);  //move each joint to next position
       
+      if(currentGaitTime > endGaitTime) {  //if time after start of gait is greater than total time for gait to finish
+        restartGait = true;  //restart gait time at current system time
+      }  //end if
+    
+    if(restartGait == true) {
+      startGaitTime = millis();
+      restartGait = false;
+    }
+
+      currentGaitTime = (millis() - startGaitTime) / 1000.0;  //time after start of gait, converted to sec
+      
+      csVal = currentGaitTime;  //set value to interpolate
+
+      if((csError = evaluate(output_ptr, csVal, &csResult)) < 0) {  //if theres an error during evaluation
+        Serial << "CS Error: " << csError << '\n';  //print the error. -1 csVal too small, -2 csVal too big, -3 it broke
+      }  //end if
+      
+      csResult = csResult * 120 / 360.0;  //convert joint output deg to motor revs w/120:1 gear ratio
+
+      allJoints[i]->SetPosition(csResult);
+      /*
       for(int j = 0;j < numJoints;j++) {  //loop through array of joints
         if(allJoints[j]->readyToMove == true) {  //if joint is at target angle
           allJointsReady = true;  //flag for program progression
@@ -236,8 +297,10 @@ void loop() {  //main control loop
             allJoints[j]->targetAngle = 0;  //reset index to beginning of array
           }  //end if
         }  //end loop
-      }  //end if
+      }  //end if*/
     }  //end loop
+    sendCmdInterval = millis();
+    }
   }// else {  //if program is not running or there is an error
     //programRunning = false;  //stop program
   //}  //end if else
@@ -305,16 +368,10 @@ void moveJoint(Joint *joint) {  //move joint to target position
     #ifdef DEBUG  //for debugging
       Serial << "Pos est: " << joint->posEstimate << ", Target: " << joint->targetAngle <<
              "(" << joint->GetTargetPosition() << ")" << '\n';  //print current and target positions
-      Serial << "Velocity: " << joint->GetVelocity() << "Pos diff: " << fabs(absDiff) << '\n';  //print joint output velocity and position difference
+      Serial << "Velocity: " << joint->GetVelocity() << ", Pos diff: " << fabs(absDiff) << '\n';  //print joint output velocity and position difference
       //Serial << "Target velocity: " << joint->targetVelocity << '\n';
     #endif
-    /*
-    if(joint->targetAngle == 0) {
-      joint->targetVelocity = (joint->angles[49] - joint->angles[0]) / segTime / 360.0 * 120;
-    } else {
-      joint->targetVelocity = (joint->angles[joint->targetAngle] - joint->angles[joint->targetAngle - 1]) / segTime / 360.0 * 120;
-    }
-    joint->SetLimits(fabs(joint->targetVelocity), motorCurrentLimit);*/
+
     joint->SetPosition(joint->GetTargetPosition());  //command motor to target position in motor revs
     
     if(fabs(absDiff) <= posDiffThreshold) {  //if motor is close enough to target position
@@ -761,7 +818,11 @@ void handleCANMsg(int axis_id, CAN_message_t inMsg, Joint *joint) {  //store dat
         joint->encoderError = odriveCAN.GetEncoderErrorResponse(inMsg);  //set joint error code
         break;  //exit switch
       case (ODriveTeensyCAN::CMD_ID_GET_ENCODER_ESTIMATES):  //if getting pos/vel
+        //Serial.println("encoder estimates");
         odriveCAN.GetPositionVelocityResponse(encoderEstimates, inMsg);  //store values from inMsg into encoderEstimates struct
+        Serial << "input_pos: " << csResult << '\n';
+        Serial << "pos est: " << encoderEstimates.posEstimate << '\n';
+        //Serial << "vel_estimate: " << encoderEstimates.velEstimate << '\n';
         joint->posEstimate = encoderEstimates.posEstimate;  //set joint position estimate
         joint->velEstimate = encoderEstimates.velEstimate;  //set joint velocity estimate
         break;  //exit switch
@@ -775,3 +836,9 @@ void handleCANMsg(int axis_id, CAN_message_t inMsg, Joint *joint) {  //store dat
         break;  //exit switch
     }  //end switch
 }  //end handleCANMsg
+
+void fillSegTimeArray() {
+  for(int i = 0;i < num_angles;i++) {
+    csXVals[i] = i * segTime;
+  }
+}
